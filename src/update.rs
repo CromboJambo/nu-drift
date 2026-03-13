@@ -6,7 +6,8 @@
 //! The philosophy here matches the confidence contract: we're modeling
 //! what happened, not asserting certainty about what it means.
 
-use crate::types::{Belief, ConceptId, Interaction, InteractionKind, Snapshot, UserState};
+use crate::types::{Belief, Snapshot, UserState};
+pub use crate::types::{Interaction, InteractionKind};
 
 /// Pure function: old state + interaction → new state
 ///
@@ -40,15 +41,23 @@ pub fn update(state: UserState, interaction: Interaction) -> UserState {
                     interaction.kind,
                 );
 
-                if updated_confidence > belief.confidence {
-                    belief.confidence = updated_confidence;
-                }
+                // Only allow downward movement on explicit confusion
+                let next_confidence = match interaction.kind {
+                    InteractionKind::Confused => updated_confidence,
+                    InteractionKind::Asked | InteractionKind::Stuck => {
+                        belief.confidence.max(updated_confidence)
+                    }
+                    InteractionKind::Applied => updated_confidence,
+                };
+
+                belief.update_confidence_with_loop_tracking(next_confidence);
             }
             None => {
                 // New concept - initialize with conservative baseline
                 let initial_confidence = match interaction.kind {
                     InteractionKind::Applied => 0.4, // Applied knowledge gets slightly higher start
                     InteractionKind::Asked | InteractionKind::Confused => 0.3, // Questions are neutral
+                    InteractionKind::Stuck => 0.3, // Stuck marker - same baseline as questions
                 };
 
                 new_state.concepts.insert(
@@ -58,14 +67,17 @@ pub fn update(state: UserState, interaction: Interaction) -> UserState {
                         last_seen: chrono::Utc::now(),
                         context: vec![interaction.id],
                         decay_rate: 0.1, // Default decay rate
+                        loop_count: 0,
+                        loop_delta: 0.0,
+                        last_confidence: None,
                     },
                 );
             }
         }
     }
 
-    // Record the interaction in trajectory (only if it's not a duplicate)
-    new_state.trajectory.push(interaction.clone());
+    // Record the interaction in trajectory
+    new_state.trajectory.push(interaction);
 
     new_state
 }
@@ -81,6 +93,7 @@ fn update_belief_confidence(
         InteractionKind::Applied => 0.15, // Application reinforces understanding
         InteractionKind::Asked => -0.02,  // Questions suggest uncertainty
         InteractionKind::Confused => -0.08, // Confusion indicates knowledge gap
+        InteractionKind::Stuck => 0.0,    // Stuck interactions are neutral markers (no change)
     };
 
     // Context length bonus: more evidence = more stable confidence
@@ -167,6 +180,9 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 context: Vec::new(),
                 decay_rate: 0.1,
+                loop_count: 0,
+                loop_delta: 0.0,
+                last_confidence: None,
             },
         );
 
@@ -197,6 +213,9 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 context: Vec::new(),
                 decay_rate: 0.0, // No decay for this test
+                loop_count: 0,
+                loop_delta: 0.0,
+                last_confidence: None,
             },
         );
 
@@ -227,6 +246,9 @@ mod tests {
                     last_seen: chrono::Utc::now(),
                     context: vec![InteractionId(i)],
                     decay_rate: 0.1,
+                    loop_count: 0,
+                    loop_delta: 0.0,
+                    last_confidence: None,
                 },
             );
         }
@@ -259,6 +281,9 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 context: Vec::new(),
                 decay_rate: 0.0, // No decay for this test
+                loop_count: 0,
+                loop_delta: 0.0,
+                last_confidence: None,
             },
         );
 
@@ -292,6 +317,9 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 context: Vec::new(),
                 decay_rate: 0.1,
+                loop_count: 0,
+                loop_delta: 0.0,
+                last_confidence: None,
             },
         );
 
@@ -314,6 +342,9 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 context: Vec::new(),
                 decay_rate: 0.1,
+                loop_count: 0,
+                loop_delta: 0.0,
+                last_confidence: None,
             },
         );
 
@@ -334,6 +365,9 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 context: Vec::new(),
                 decay_rate: 1.0, // High decay rate for test
+                loop_count: 0,
+                loop_delta: 0.0,
+                last_confidence: None,
             },
         );
 

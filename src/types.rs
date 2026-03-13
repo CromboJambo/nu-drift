@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Tolerance for considering confidence "not moving" - tuned to avoid false positives
+const EPSILON: f32 = 0.01;
+
 /// Unique identifier for a concept being tracked
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConceptId(pub String);
@@ -42,6 +45,20 @@ pub struct Belief {
     /// Higher = faster decay, lower = more stable
     #[serde(rename = "decay_rate")]
     pub decay_rate: f32,
+
+    /// Number of consecutive iterations where confidence hasn't moved meaningfully
+    /// This detects loops: agent keeps working on same concept without progress
+    #[serde(default)]
+    pub loop_count: u32,
+
+    /// Confidence change from last update - trending up or down?
+    /// Used to detect if we're stuck in a pattern of no progress
+    #[serde(default)]
+    pub loop_delta: f32,
+
+    /// Previous confidence value for delta calculation (not serialized)
+    #[serde(skip)]
+    pub last_confidence: Option<f32>,
 }
 
 impl Belief {
@@ -54,7 +71,47 @@ impl Belief {
             last_seen: Utc::now(),
             context: Vec::new(),
             decay_rate,
+            loop_count: 0,
+            loop_delta: 0.0,
+            last_confidence: None,
         }
+    }
+
+    /// Update confidence and track loop detection metrics
+    pub fn update_confidence_with_loop_tracking(&mut self, new_confidence: f32) {
+        assert!(new_confidence >= 0.0 && new_confidence <= 1.0);
+
+        // Calculate delta from previous confidence
+        let delta = new_confidence - self.confidence;
+        self.loop_delta = delta;
+        self.last_confidence = Some(self.confidence);
+
+        if delta.abs() < EPSILON {
+            // Not moving meaningfully — potential loop
+            self.loop_count += 1;
+        } else if delta > 0.0 {
+            // Making progress — reset loop counter
+            self.loop_count = 0;
+        } else {
+            // Moving but wrong direction — still a loop
+            self.loop_count += 1;
+        }
+
+        self.confidence = new_confidence;
+        self.last_seen = Utc::now();
+    }
+
+    /// Reset loop counter when making progress on a concept
+    pub fn reset_loop_count(&mut self) {
+        self.loop_count = 0;
+        self.loop_delta = 0.0;
+        self.last_confidence = None;
+    }
+
+    /// Check if this belief is stuck (high loop count with no positive progress)
+    pub fn is_stuck(&self) -> bool {
+        const LOOP_THRESHOLD: u32 = 5; // Tunable parameter
+        self.loop_count > LOOP_THRESHOLD && self.loop_delta <= 0.0
     }
 
     /// Apply time-based decay to confidence
@@ -64,11 +121,32 @@ impl Belief {
         self.last_seen = Utc::now();
     }
 
-    /// Update confidence with new evidence
+    /// Update confidence with new evidence (legacy method, uses loop tracking)
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use update_confidence_with_loop_tracking instead"
+    )]
     pub fn update_confidence(&mut self, new_confidence: f32) {
         assert!(new_confidence >= 0.0 && new_confidence <= 1.0);
-        self.confidence = new_confidence;
-        self.last_seen = Utc::now();
+        self.update_confidence_with_loop_tracking(new_confidence);
+    }
+
+    /// Check if this belief needs revisiting (confidence below threshold)
+    pub fn needs_revisiting(&self, threshold: f32) -> bool {
+        self.confidence < threshold
+    }
+
+    /// Get concepts where agent is stuck - high loop count with no positive progress
+    pub fn get_stuck_concepts(concepts: &HashMap<ConceptId, Belief>) -> Vec<(ConceptId, u32)> {
+        let mut stuck: Vec<_> = concepts
+            .iter()
+            .filter(|(_, b)| b.is_stuck())
+            .map(|(k, b)| (k.clone(), b.loop_count))
+            .collect();
+
+        // Sort by loop count descending - most stuck first
+        stuck.sort_by(|a, b| b.1.cmp(&a.1));
+        stuck
     }
 
     /// Add context reference (proof by implication)
@@ -96,6 +174,9 @@ pub enum InteractionKind {
 
     /// User applied knowledge in practice
     Applied,
+
+    /// Agent has detected stuck pattern - confidence not moving after repeated attempts
+    Stuck,
 }
 
 /// A single learning interaction record
@@ -190,41 +271,6 @@ impl UserState {
             .or_insert_with(|| Belief::new(0.5, 0.1))
     }
 
-    /// Record an interaction and update related beliefs (mutable API)
-    pub fn record_interaction(
-        &mut self,
-        kind: InteractionKind,
-        concepts_touched: &[ConceptId],
-    ) -> InteractionId {
-        let id = InteractionId(self.trajectory.len() as u64);
-        let mut interaction = Interaction::new_from_trajectory(id.0, kind, concepts_touched);
-
-        // Update beliefs based on interaction type
-        for concept_id in &interaction.concepts_touched {
-            if let Some(belief) = self.concepts.get_mut(concept_id) {
-                belief.add_context(id);
-
-                match kind {
-                    InteractionKind::Applied => {
-                        // Application should increase confidence
-                        belief.update_confidence((belief.confidence + 0.2).min(1.0));
-                        interaction.resolved = true;
-                    }
-                    InteractionKind::Asked | InteractionKind::Confused => {
-                        // Questions don't directly change confidence, just add context
-                    }
-                }
-            } else if kind == InteractionKind::Applied {
-                // New concept that was applied - start with higher baseline
-                self.concepts
-                    .insert(concept_id.clone(), Belief::new(0.6, 0.15));
-            }
-        }
-
-        self.trajectory.push(interaction);
-        id
-    }
-
     /// Set a basecamp snapshot at current state
     pub fn set_basecamp(&mut self, description: &str, confidence_threshold: f32) -> bool {
         let min_confidence = self
@@ -265,6 +311,15 @@ impl UserState {
             .collect()
     }
 
+    /// Get concepts where agent is stuck - high loop count with no positive progress
+    pub fn get_stuck_concepts(&self) -> Vec<(ConceptId, u32)> {
+        self.concepts
+            .iter()
+            .filter(|(_, b)| b.is_stuck())
+            .map(|(k, b)| (k.clone(), b.loop_count))
+            .collect()
+    }
+
     /// Get last N applied interactions
     pub fn last_applied(&self, n: usize) -> Vec<&Interaction> {
         self.trajectory
@@ -283,5 +338,102 @@ impl UserState {
     /// Deserialize state from JSON
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::update::{update, Interaction};
+
+    #[test]
+    fn test_loop_count_increases_on_asked_interactions() {
+        let mut state = UserState::default();
+        let concept = ConceptId("test".to_string());
+
+        // Apply first to create the belief
+        let interaction = Interaction::new_from_trajectory(
+            state.trajectory.len() as u64,
+            InteractionKind::Applied,
+            &[concept.clone()],
+        );
+        state = update(state, interaction);
+
+        // Multiple Asked interactions should increase loop count
+        for _ in 0..10 {
+            let interaction = Interaction::new_from_trajectory(
+                state.trajectory.len() as u64,
+                InteractionKind::Asked,
+                &[concept.clone()],
+            );
+            state = update(state, interaction);
+        }
+
+        let belief = state.concepts.get(&concept).unwrap();
+        assert!(
+            belief.loop_count >= 8,
+            "Loop count should be at least 8 after 10 Asked interactions"
+        );
+    }
+
+    #[test]
+    fn test_stuck_detection_triggers_after_threshold() {
+        let mut state = UserState::default();
+        let concept = ConceptId("stuck_concept".to_string());
+
+        // Apply first to create the belief with high confidence
+        let interaction = Interaction::new_from_trajectory(
+            state.trajectory.len() as u64,
+            InteractionKind::Applied,
+            &[concept.clone()],
+        );
+        state = update(state, interaction);
+
+        // Manually set up a stuck state (high loop count, non-positive delta)
+        if let Some(belief) = state.concepts.get_mut(&concept) {
+            belief.loop_count = 6;
+            belief.loop_delta = -0.01;
+        }
+
+        let stuck = state.get_stuck_concepts();
+        assert_eq!(stuck.len(), 1, "Should detect the concept as stuck");
+    }
+
+    #[test]
+    fn test_loop_reset_on_application() {
+        let mut state = UserState::default();
+        let concept = ConceptId("reset_test".to_string());
+
+        // Apply first to create belief
+        let interaction = Interaction::new_from_trajectory(
+            state.trajectory.len() as u64,
+            InteractionKind::Applied,
+            &[concept.clone()],
+        );
+        state = update(state, interaction);
+
+        // Some Asked interactions (increases loop count)
+        for _ in 0..5 {
+            let interaction = Interaction::new_from_trajectory(
+                state.trajectory.len() as u64,
+                InteractionKind::Asked,
+                &[concept.clone()],
+            );
+            state = update(state, interaction);
+        }
+
+        // Another Application should reset the loop counter
+        let interaction = Interaction::new_from_trajectory(
+            state.trajectory.len() as u64,
+            InteractionKind::Applied,
+            &[concept.clone()],
+        );
+        state = update(state, interaction);
+
+        let belief = state.concepts.get(&concept).unwrap();
+        assert!(
+            belief.loop_count < 5,
+            "Loop count should be reduced after application"
+        );
     }
 }

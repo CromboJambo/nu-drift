@@ -68,15 +68,3 @@ export def main [
         }
     }
 }
-```
-
-<tool_call>
-<function=create_file>
-<parameter=path>
-nu-drift/scripts/last_built.nu
-</parameter>
-<parameter=mode>
-create
-</parameter>
-</function>
-</tool_call>

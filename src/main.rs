@@ -1,242 +1,166 @@
-//! Nu Drift - Learning Agent Framework
+//! Nu Drift - Async Learning State Manager
 //!
-//! The core philosophy: invert the reward structure. The tool serves the user
-//! as their self-authored basecamp. It never performs certainty it doesn't have.
-//! Neither does the user.
+//! This is the async runtime for nu-drift. It wraps the pure sync types
+//! behind an `Arc<Mutex<>>` to handle concurrent access safely while
+//! maintaining the immutable update semantics of the core system.
+
+use std::sync::{Arc, Mutex};
 
 mod types;
 mod update;
 
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::{self, Write};
 use types::{ConceptId, InteractionKind, UserState};
+use update::update;
 
-/// Configuration for the agent loop
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
-    /// Model identifier (OpenRouter-compatible APIs)
-    pub model: String,
-    /// API endpoint URL
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_endpoint: Option<String>,
-    /// Minimum confidence threshold for basecamp
-    pub basecamp_threshold: f32,
+/// Async-safe state wrapper using Arc<Mutex<>> pattern
+/// This is the load-bearing ownership model for async code
+#[derive(Clone)]
+pub struct State {
+    inner: Arc<Mutex<UserState>>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl State {
+    pub fn new() -> Self {
         Self {
-            model: "anthropic/claude-3-haiku".to_string(),
-            api_endpoint: None,
-            basecamp_threshold: 0.7,
-        }
-    }
-}
-
-/// State persistence manager
-struct StateManager {
-    state_file: String,
-    state: UserState,
-}
-
-impl StateManager {
-    fn new(state_file: &str) -> Self {
-        let state = match fs::read_to_string(state_file) {
-            Ok(json) => UserState::from_json(&json).unwrap_or_default(),
-            Err(_) => UserState::default(),
-        };
-
-        Self {
-            state_file: state_file.to_string(),
-            state,
+            inner: Arc::new(Mutex::new(UserState::default())),
         }
     }
 
-    fn load(&mut self) -> &UserState {
-        if let Ok(json) = fs::read_to_string(&self.state_file) {
-            if let Ok(parsed) = UserState::from_json(&json) {
-                self.state = parsed;
-            }
-        }
-        &self.state
+    /// Get a snapshot of current state (clones the mutex contents)
+    pub async fn get_state(&self) -> UserState {
+        self.inner.lock().unwrap().clone()
     }
 
-    fn save(&self) -> io::Result<()> {
-        let json = self.state.to_json().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("Serialization error: {}", e))
-        })?;
-        fs::write(&self.state_file, json)
-    }
-
-    fn record_interaction(
-        &mut self,
+    /// Record an interaction and update beliefs atomically
+    pub async fn record_interaction(
+        &self,
         kind: InteractionKind,
         concepts_touched: &[ConceptId],
     ) -> types::InteractionId {
-        let _id = types::InteractionId(self.state.trajectory.len() as u64);
-        self.state.record_interaction(kind, concepts_touched)
+        let mut state = self.inner.lock().unwrap();
+        let id = types::InteractionId(state.trajectory.len() as u64);
+        let interaction = types::Interaction::new_from_trajectory(id.0, kind, concepts_touched);
+
+        let old_state = std::mem::take(&mut *state);
+        let new_state = update(old_state, interaction);
+        *state = new_state;
+
+        id
     }
 
-    fn get_state_mut(&mut self) -> &mut UserState {
-        &mut self.state
+    /// Update beliefs using the pure update function (preferred pattern)
+    pub async fn apply_update(
+        &self,
+        interaction: update::Interaction,
+    ) -> Result<types::UserState, String> {
+        // Run pure update in-place with a single lock
+        let mut state = self.inner.lock().unwrap();
+        let old_state = std::mem::take(&mut *state);
+        let new_state = update(old_state, interaction);
+        *state = new_state.clone();
+        Ok(new_state)
+    }
+
+    /// Set basecamp snapshot (atomic operation)
+    pub async fn set_basecamp(&self, description: &str, threshold: f32) -> bool {
+        let mut state = self.inner.lock().unwrap();
+        state.set_basecamp(description, threshold)
+    }
+
+    /// Get stuck concepts for intervention queue (async-safe query)
+    pub async fn get_stuck_concepts(&self) -> Vec<(types::ConceptId, u32)> {
+        let state = self.inner.lock().unwrap();
+        // Belief is owned in the HashMap, so we can collect owned values
+        state
+            .concepts
+            .iter()
+            .filter(|(_, b)| b.is_stuck())
+            .map(|(k, b)| (k.clone(), b.loop_count))
+            .collect()
+    }
+
+    /// Apply decay to all beliefs (time-based cleanup)
+    pub async fn apply_decay(&self) {
+        let mut state = self.inner.lock().unwrap();
+        state.apply_all_decay();
+    }
+
+    /// Get concepts needing revisiting below threshold
+    pub async fn needs_revisiting(&self, threshold: f32) -> Vec<(types::ConceptId, types::Belief)> {
+        let state = self.inner.lock().unwrap();
+        // Return owned values to avoid lifetime issues with mutex-locked data
+        state
+            .concepts
+            .iter()
+            .filter(|(_, b)| b.confidence < threshold)
+            .map(|(k, b)| (k.clone(), b.clone()))
+            .collect()
+    }
+
+    /// Serialize current state to JSON (async-safe query)
+    pub async fn to_json(&self) -> Result<String, serde_json::Error> {
+        let state = self.inner.lock().unwrap();
+        state.to_json()
+    }
+
+    /// Deserialize and replace entire state from JSON
+    pub async fn from_json(&self, json: &str) -> Result<(), serde_json::Error> {
+        let new_state = types::UserState::from_json(json)?;
+        *self.inner.lock().unwrap() = new_state;
+        Ok(())
     }
 }
 
-/// Synchronous agent loop skeleton
-///
-/// This is the core reasoning loop. It:
-/// 1. Loads current state
-/// 2. Queries for what needs attention (via tools)
-/// 3. Makes API call to get reasoning/response
-/// 4. Records result as interaction
-/// 5. Updates state deterministically
-fn agent_loop(
-    config: &Config,
-    manager: &mut StateManager,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Nu Drift Agent Loop ===");
-    println!("Model: {}", config.model);
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    // Load current state
-    let _state = manager.load();
+/// Run multiple interactions and check for stuck concepts (async demo)
+async fn run_demo(state: &State) {
+    use types::{ConceptId, InteractionKind};
 
-    // Query layer: what needs revisiting?
-    if let Some(concepts) = query_needs_revisiting(manager.get_state_mut(), 0.5) {
-        println!("\nConcepts needing revisiting (confidence < 0.5):");
-        for (concept_id, belief) in concepts {
-            println!(
-                "  - {}: {:.2} (last seen: {})",
-                concept_id.0, belief.confidence, belief.last_seen
-            );
+    println!("=== Async Learning Demo ===\n");
+
+    let concept1 = ConceptId("async_await".to_string());
+
+    println!("Recording initial interactions...");
+
+    // First, apply the concept to create it in the state
+    state
+        .record_interaction(InteractionKind::Applied, &[concept1.clone()])
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Then simulate repeated asking (no progress, loop counter increases)
+    for _ in 0..8 {
+        state
+            .record_interaction(InteractionKind::Asked, &[concept1.clone()])
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Small delay between calls
+    }
+
+    println!("\nChecking for stuck concepts...");
+    let stuck = state.get_stuck_concepts().await;
+    if stuck.is_empty() {
+        println!("No concepts are stuck yet (loop detection needs more iterations)");
+    } else {
+        println!("Stuck concepts:");
+        for (concept_id, loop_count) in stuck {
+            println!("  - {}: {} loops", concept_id.0, loop_count);
         }
-    } else {
-        println!("\nNo concepts currently below confidence threshold.");
     }
 
-    // Query layer: what did they actually build?
-    if let Some(latest) = query_last_built(manager.get_state_mut(), 3) {
-        println!("\nLast {} applied interactions:", latest.len());
-        for interaction in latest {
-            println!(
-                "  - {:?} at {}, concepts: {:?}",
-                interaction.kind, interaction.at, interaction.concepts_touched
-            );
-        }
-    }
-
-    // In a real implementation, this would be where we call the API
-    // For now, we simulate with interactive input
-    println!("\n--- Interactive Demo ---");
-    print!("Enter concept name (or 'q' to quit): ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim();
-
-    if input == "q" || input.is_empty() {
-        println!("Exiting demo. State saved.");
-        manager.save()?;
-        return Ok(());
-    }
-
-    // Record interaction based on user intent
-    print!(
-        "What happened with '{}'?\n  [1] Asked a question\n  [2] Expressed confusion\n  [3] Applied knowledge\nChoice: ",
-        input
-    );
-    io::stdout().flush()?;
-
-    let mut choice = String::new();
-    io::stdin().read_line(&mut choice)?;
-    let kind = match choice.trim() {
-        "1" => InteractionKind::Asked,
-        "2" => InteractionKind::Confused,
-        "3" => InteractionKind::Applied,
-        _ => {
-            println!("Invalid choice. Exiting.");
-            manager.save()?;
-            return Ok(());
-        }
-    };
-
-    let concept_id = ConceptId(input.to_string());
-    manager.record_interaction(kind, &[concept_id]);
-
-    // Apply decay to simulate time passing (optional in demo)
-    if kind == InteractionKind::Applied {
-        println!("Knowledge applied. Confidence updated.");
-    } else {
-        println!("Interaction recorded. State persists.");
-    }
-
-    manager.save()?;
-
-    Ok(())
+    // Show current state as JSON
+    let json = state.to_json().await.unwrap();
+    println!("\nCurrent state:");
+    println!("{}", json);
 }
 
-/// Query: what needs revisiting?
-fn query_needs_revisiting(
-    state: &UserState,
-    threshold: f32,
-) -> Option<Vec<(&ConceptId, &types::Belief)>> {
-    let concepts = state.needs_revisiting(threshold);
-    if concepts.is_empty() {
-        None
-    } else {
-        Some(concepts)
-    }
-}
-
-/// Query: what did they actually build?
-fn query_last_built(state: &UserState, n: usize) -> Option<Vec<types::Interaction>> {
-    let applied = state.last_applied(n);
-    if applied.is_empty() {
-        None
-    } else {
-        Some(applied.into_iter().cloned().collect())
-    }
-}
-
-/// Load configuration from file or use defaults
-fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
-    if let Ok(json) = fs::read_to_string(path) {
-        serde_json::from_str(&json).map_err(|e| format!("Config parse error: {}", e).into())
-    } else {
-        println!("No config file at {}, using defaults", path);
-        Ok(Config::default())
-    }
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state_file = "state.json";
-    let config_path = "config.toml";
-
-    println!("Nu Drift v0.1.0");
-    println!("Learning agent with calibrated uncertainty\n");
-
-    // Try to load config, fall back to defaults
-    let mut config = match load_config(config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Warning: {}", e);
-            Config::default()
-        }
-    };
-
-    // Allow environment variable override for API endpoint (for testing)
-    if let Ok(endpoint) = std::env::var("NU_DRIFT_API_ENDPOINT") {
-        config.api_endpoint = Some(endpoint);
-    }
-
-    let mut manager = StateManager::new(state_file);
-
-    // Run agent loop
-    match agent_loop(&config, &mut manager) {
-        Ok(()) => println!("\nSession complete."),
-        Err(e) => eprintln!("Error in agent loop: {}", e),
-    }
-
+/// Main async entry point with tokio runtime
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run_demo(&State::new()).await;
     Ok(())
 }
