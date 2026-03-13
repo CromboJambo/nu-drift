@@ -137,6 +137,30 @@ fn apply_decay_to_all(state: &mut crate::types::UserState) {
     }
 }
 
+/// Create a basecamp snapshot at current state minimum confidence
+#[cfg(test)]
+fn set_basecamp(
+    state: &crate::types::UserState,
+    description: &str,
+    threshold: f32,
+) -> Option<crate::types::Snapshot> {
+    let min_confidence = state
+        .concepts
+        .values()
+        .map(|b| b.confidence)
+        .fold(f32::MAX, |a, b| a.min(b));
+
+    if min_confidence >= threshold && !state.concepts.is_empty() {
+        return Some(crate::types::Snapshot {
+            description: description.to_string(),
+            snapshot_at: chrono::Utc::now(),
+            confidence_threshold: min_confidence,
+        });
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
