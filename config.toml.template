@@ -1,0 +1,26 @@
+# Nu Drift Configuration Template
+# Copy this to config.toml and customize for your setup
+# This file is not committed to git (.gitignore)
+
+[agent]
+model = "anthropic/claude-3-haiku"
+api_endpoint = ""  # Optional: override default Anthropic endpoint
+basecamp_threshold = 0.7  # Minimum confidence required to set basecamp
+
+[network]
+timeout_seconds = 30
+max_retries = 3
+
+[logging]
+level = "info"  # debug | info | warn | error
+state_file = "state.json"
+
+# API Keys (use environment variables instead)
+# NU_DRIFT_API_KEY = ""  # For Anthropic or OpenRouter
+# NU_DRIFT_BASE_URL = ""  # Optional custom endpoint
+
+# Model options:
+# - anthropic/claude-3-haiku (default, fast, cheap)
+# - anthropic/claude-3-opus (slower, better reasoning)
+# - openai/gpt-4o (alternative provider)
+# - local/lmstudio/model-name (if running locally via LM Studio)

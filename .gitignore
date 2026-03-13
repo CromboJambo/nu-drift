@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# State and config (user-specific, not committed)
+state.json
+config.toml
+.env
+
+# Generated documentation
+docs/build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
