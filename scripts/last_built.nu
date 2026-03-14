@@ -65,22 +65,3 @@ export def main [
         if $format == "concise" {
             print $"Previous questions/confusion: ($questions | length)"
         } else {
-            print $"Recent questions and confusion ({($questions | length)}):"
-            $questions | each {|q|
-                print $"  - ($q.at): ($q.concepts_touched | str join ', ')"
-            }
-        }
-    }
-
-    # Basecamp reference if exists
-    if $state.basecamp != null {
-        print "\n--- Current Basecamp ---"
-        if $format == "concise" {
-            $"Located at: ($state.basecamp.description) (confidence ≥ $($state.basecamp.confidence_threshold | into string --precision 2))"
-        } else {
-            print $"Description: ($state.basecamp.description)"
-            print $"Established: ($state.basecamp.snapshot_at)"
-            print $"Minimum confidence required: ($state.basecamp.confidence_threshold | into string --precision 2)"
-        }
-    }
-}
