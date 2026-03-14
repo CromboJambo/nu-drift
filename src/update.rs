@@ -20,7 +20,10 @@ pub use crate::types::{Interaction, InteractionKind};
 ///
 /// # Returns
 /// A new UserState reflecting the updated knowledge model
-pub fn update(state: crate::types::UserState, interaction: Interaction) -> crate::types::UserState {
+pub fn update(
+    state: crate::types::UserState,
+    mut interaction: Interaction,
+) -> crate::types::UserState {
     let mut new_state = state;
 
     // Apply time decay before recording new interaction

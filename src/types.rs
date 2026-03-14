@@ -289,10 +289,10 @@ impl UserState {
         concepts_touched: &[ConceptId],
     ) -> InteractionId {
         let id = InteractionId(self.trajectory.len() as u64);
-        let mut interaction = Interaction::new_from_trajectory(id.0, kind, concepts_touched);
+        let interaction = Interaction::new_from_trajectory(id.0, kind, concepts_touched);
 
         // Use the pure update() function for state transition
-        *self = update::update(std::mem::replace(self, UserState::default()), interaction);
+        *self = crate::update::update(std::mem::replace(self, UserState::default()), interaction);
 
         id
     }
