@@ -33,18 +33,29 @@ pub fn update(state: crate::types::UserState, interaction: Interaction) -> crate
                 // Add context reference (proof by implication)
                 belief.add_context(interaction.id);
 
-                // Update confidence based on interaction type and existing evidence
-                let _ = update_belief_confidence(
-                    belief,
-                    belief.confidence,
-                    belief.context.len(),
-                    interaction.kind,
-                );
+                // Update confidence based on interaction type
+                match interaction.kind {
+                    InteractionKind::Applied => {
+                        // Application should increase confidence
+                        belief.update_confidence_with_loop_tracking(
+                            (belief.confidence + 0.2).min(1.0),
+                        );
+                        interaction.resolved = true;
+                    }
+                    InteractionKind::Asked | InteractionKind::Confused => {
+                        // Questions don't directly change confidence, but we track loop attempts
+                        belief.loop_count += 1;
+                    }
+                    InteractionKind::Stuck => {
+                        // Stuck marker - no direct confidence change, just record the observation
+                        belief.loop_count += 1;
+                    }
+                }
             }
             None => {
                 // New concept - initialize with conservative baseline
                 let initial_confidence = match interaction.kind {
-                    InteractionKind::Applied => 0.4, // Applied knowledge gets slightly higher start
+                    InteractionKind::Applied => 0.6, // Applied knowledge gets higher start
                     InteractionKind::Asked | InteractionKind::Confused => 0.3, // Questions are neutral
                     InteractionKind::Stuck => 0.3, // Stuck marker - same baseline as questions
                 };
@@ -55,7 +66,7 @@ pub fn update(state: crate::types::UserState, interaction: Interaction) -> crate
                         confidence: initial_confidence,
                         last_seen: chrono::Utc::now(),
                         context: vec![interaction.id],
-                        decay_rate: 0.1, // Default decay rate
+                        decay_rate: 0.15, // Slightly higher decay for new concepts
                         loop_count: 0,
                         loop_delta: 0.0,
                         last_confidence: None,
@@ -69,57 +80,6 @@ pub fn update(state: crate::types::UserState, interaction: Interaction) -> crate
     new_state.trajectory.push(interaction);
 
     new_state
-}
-
-/// Calculate updated confidence based on evidence and interaction type
-/// Also updates loop tracking fields
-fn update_belief_confidence(
-    belief: &mut crate::types::Belief,
-    current_confidence: f32,
-    context_length: usize,
-    kind: InteractionKind,
-) -> f32 {
-    // Base adjustment from interaction type
-    let base_adjustment = match kind {
-        InteractionKind::Applied => 0.15, // Application reinforces understanding
-        InteractionKind::Asked => -0.02,  // Questions suggest uncertainty
-        InteractionKind::Confused => -0.08, // Confusion indicates knowledge gap
-        InteractionKind::Stuck => 0.0,    // Stuck interactions are neutral markers (no change)
-    };
-
-    // Context length bonus: more evidence = more stable confidence
-    let context_bonus = if context_length > 3 {
-        0.05 * (context_length as f32).min(10.0) / 10.0
-    } else {
-        0.0
-    };
-
-    // Calculate delta first
-    let delta = base_adjustment + context_bonus;
-
-    // Calculate new confidence
-    let mut new_confidence = current_confidence + delta;
-    new_confidence = new_confidence.max(0.0).min(1.0);
-
-    // Update loop tracking
-    if delta.abs() < 0.01 {
-        // Not moving meaningfully — potential loop
-        belief.loop_count += 1;
-    } else if delta > 0.0 {
-        // Making progress — reset loop counter
-        belief.loop_count = 0;
-    } else {
-        // Moving but wrong direction — still a loop
-        belief.loop_count += 1;
-    }
-
-    // Store previous confidence for decay
-    belief.last_confidence = Some(current_confidence);
-
-    // Update confidence
-    belief.confidence = new_confidence;
-
-    new_confidence
 }
 
 /// Apply time-based decay to all beliefs in state
@@ -185,7 +145,7 @@ mod tests {
 
         assert!(new_state.concepts.contains_key(&test_concept()));
         let belief = new_state.concepts.get(&test_concept()).unwrap();
-        assert_eq!(belief.confidence, 0.4); // Applied gets higher baseline
+        assert_eq!(belief.confidence, 0.6); // Applied gets higher baseline
     }
 
     #[test]

@@ -281,6 +281,8 @@ impl UserState {
     }
 
     /// Record an interaction and update related beliefs (mutable API)
+    /// This is a convenience wrapper around the pure update() function
+    /// to provide an ergonomic mutable API for the async State wrapper
     pub fn record_interaction(
         &mut self,
         kind: InteractionKind,
@@ -289,42 +291,9 @@ impl UserState {
         let id = InteractionId(self.trajectory.len() as u64);
         let mut interaction = Interaction::new_from_trajectory(id.0, kind, concepts_touched);
 
-        // Update beliefs based on interaction type
-        for concept_id in &interaction.concepts_touched {
-            if let Some(belief) = self.concepts.get_mut(concept_id) {
-                belief.add_context(id);
+        // Use the pure update() function for state transition
+        *self = update::update(std::mem::replace(self, UserState::default()), interaction);
 
-                match kind {
-                    InteractionKind::Applied => {
-                        // Application should increase confidence
-                        belief.update_confidence_with_loop_tracking(
-                            (belief.confidence + 0.2).min(1.0),
-                        );
-                        interaction.resolved = true;
-                    }
-                    InteractionKind::Asked | InteractionKind::Confused => {
-                        // Questions don't directly change confidence, but we track loop attempts
-                        // This simulates the agent trying to resolve uncertainty without progress
-                        belief.loop_count += 1;
-                    }
-                    InteractionKind::Stuck => {
-                        // Stuck marker - no direct confidence change, just record the observation
-                        belief.loop_count += 1;
-                    }
-                }
-            } else if kind == InteractionKind::Applied {
-                // New concept that was applied - start with higher baseline
-                // This resets loop tracking when a concept is successfully applied
-                if let Some(existing) = self.concepts.get_mut(&concept_id) {
-                    existing.loop_count = 0;
-                    existing.last_confidence = None;
-                }
-                self.concepts
-                    .insert(concept_id.clone(), Belief::new(0.6, 0.15));
-            }
-        }
-
-        self.trajectory.push(interaction);
         id
     }
 
