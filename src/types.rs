@@ -191,6 +191,8 @@ pub enum InteractionKind {
 /// A single learning interaction record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interaction {
+impl std::fmt::Display for Interaction {
+use std::fmt;
     pub id: InteractionId,
     pub kind: InteractionKind,
     pub concepts_touched: Vec<ConceptId>,

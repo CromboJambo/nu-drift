@@ -7,7 +7,8 @@
 use std::sync::{Arc, Mutex};
 
 mod types;
-mod update;
+mod types_display;
+mod automation;
 
 use types::{ConceptId, InteractionKind, UserState};
 use update::update;
