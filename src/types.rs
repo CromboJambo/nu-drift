@@ -191,14 +191,22 @@ pub enum InteractionKind {
 /// A single learning interaction record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interaction {
-impl std::fmt::Display for Interaction {
-use std::fmt;
     pub id: InteractionId,
     pub kind: InteractionKind,
     pub concepts_touched: Vec<ConceptId>,
     pub resolved: bool,
     #[serde(with = "chrono::serde::ts_seconds")]
     pub at: DateTime<Utc>,
+}
+
+impl std::fmt::Display for Interaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Interaction {{ id: {}, kind: {:?}, concepts: {:?}, resolved: {}, at: {} }}",
+            self.id.0, self.kind, self.concepts_touched, self.resolved, self.at
+        )
+    }
 }
 
 impl Interaction {

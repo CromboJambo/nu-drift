@@ -65,3 +65,15 @@ export def main [
         if $format == "concise" {
             print $"Previous questions/confusion: ($questions | length)"
         } else {
+            $questions | each {|i|
+                {
+                    id: $i.id,
+                    timestamp: $i.at,
+                    kind: $i.kind,
+                    concepts: ($i.concepts_touched | str join ', '),
+                    resolved: (if $i.resolved { "✓" } else { "" })
+                }
+            } | table --expand
+        }
+    }
+}

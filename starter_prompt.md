@@ -139,8 +139,14 @@ philosophy as the type system — data has shape, queries respect that shape.
 2. Define `UserState`, `Belief`, `Interaction` as serde-serializable types
 3. Write `fn update()` as a pure function
 4. Write Nu scripts to query state
-5. Wire a single tool: `record_interaction`
+5. Wire a single tool: `record_interaction` with explicit `concepts_touched`
 6. Build from there — one mechanism at a time, one motto per session
+
+Explicit tagging (manual-first)
+-------------------------------
+- The system does not infer concepts from text.
+- Concepts are passed explicitly with each interaction.
+- This keeps the model honest and the data traceable.
 
 The mess is the point. Every interesting idea is a collision of influences
 the builder can't fully untangle. Build it anyway.
